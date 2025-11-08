@@ -15,7 +15,7 @@ import yt_dlp
 from groq import Groq
 
 # Импорт ClippedAI модулей
-from clipsai import ClipFinder, Transcriber, resize, add_subtitles
+from clipsai import Transcriber, ClipFinder, resize, MediaEditor, AudioVideoFile
 
 # ============= НАСТРОЙКИ =============
 TELEGRAM_BOT_TOKEN = "8577135156:AAFij6C6rbbzmgg761svzglXNZ4O6xL92Dg"
