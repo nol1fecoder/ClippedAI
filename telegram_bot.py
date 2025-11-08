@@ -14,13 +14,14 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
 from groq import Groq
+from huggingface_hub import login
 
 # Импорт ClippedAI модулей
 from clipsai import Transcriber, ClipFinder, resize, MediaEditor, AudioVideoFile
 
 # ============= НАСТРОЙКИ =============
 TELEGRAM_BOT_TOKEN = "8577135156:AAFij6C6rbbzmgg761svzglXNZ4O6xL92Dg"
-HUGGINGFACE_TOKEN = "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"
+HUGGINGFACE_TOKEN = "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"
 GROQ_API_KEY = "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"
 # =====================================
 
@@ -31,9 +32,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Установка переменных окружения
-os.environ['HUGGINGFACE_TOKEN'] = HUGGINGFACE_TOKEN
-os.environ['HF_TOKEN'] = HUGGINGFACE_TOKEN
+# Авторизация в Hugging Face
+login(HUGGINGFACE_TOKEN)
 
 # Создание папок
 Path("input").mkdir(exist_ok=True)
