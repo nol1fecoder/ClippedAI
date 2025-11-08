@@ -8,6 +8,7 @@ import os
 import sys
 import logging
 import asyncio
+import subprocess
 from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -39,7 +40,7 @@ Path("output").mkdir(exist_ok=True)
 
 # Инициализация AI моделей
 logger.info("🤖 Инициализация AI моделей...")
-transcriber = Transcriber(model_size="base")  # base = оптимальная скорость
+transcriber = Transcriber(model_size="large-v2")  # large-v2 = лучшая точность
 clip_finder = ClipFinder()
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -82,10 +83,61 @@ def generate_viral_title(transcript_text: str) -> str:
             max_tokens=50
         )
         title = response.choices[0].message.content.strip()
-        return title[:60]  # Ограничение длины
+        return title[:60]
     except Exception as e:
         logger.error(f"Title generation error: {e}")
         return "🔥 Amazing Moment"
+
+def create_subtitled_video(video_path: str, transcription, clip, output_path: str) -> str:
+    """Создает видео с субтитрами"""
+    try:
+        # Получаем слова для клипа
+        word_info = [w for w in transcription.get_word_info() 
+                     if w["start_time"] >= clip.start_time and w["end_time"] <= clip.end_time]
+        
+        if not word_info:
+            logger.warning("No words found for subtitles, returning original video")
+            return video_path
+        
+        # Создаем простые субтитры через FFmpeg
+        srt_file = output_path.replace('.mp4', '.srt')
+        with open(srt_file, 'w', encoding='utf-8') as f:
+            counter = 1
+            for i in range(0, len(word_info), 5):  # Группируем по 5 слов
+                words_group = word_info[i:i+5]
+                start_time = words_group[0]["start_time"] - clip.start_time
+                end_time = words_group[-1]["end_time"] - clip.start_time
+                text = " ".join([w["word"] for w in words_group])
+                
+                f.write(f"{counter}\n")
+                f.write(f"{format_srt_time(start_time)} --> {format_srt_time(end_time)}\n")
+                f.write(f"{text}\n\n")
+                counter += 1
+        
+        # Применяем субтитры через FFmpeg
+        cmd = [
+            'ffmpeg', '-i', video_path,
+            '-vf', f"subtitles={srt_file}:force_style='FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=10'",
+            '-c:a', 'copy',
+            '-y', output_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        # Удаляем временный SRT файл
+        os.remove(srt_file)
+        
+        return output_path
+    except Exception as e:
+        logger.error(f"Subtitle error: {e}")
+        return video_path
+
+def format_srt_time(seconds: float) -> str:
+    """Форматирует время для SRT файла"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 async def process_video_task(video_path: str, num_clips: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Обработка видео в фоне"""
@@ -96,12 +148,14 @@ async def process_video_task(video_path: str, num_clips: int, chat_id: int, cont
         
         # Поиск клипов
         await context.bot.send_message(chat_id, "🎯 AI ищет лучшие моменты...")
-        clips = clip_finder.find_clips(transcription=transcription, num_clips=num_clips)
+        clips = clip_finder.find_clips(transcription=transcription)
         
         if not clips:
             await context.bot.send_message(chat_id, "❌ Не удалось найти подходящие моменты для клипов")
             return
         
+        # Ограничиваем количество клипов
+        clips = clips[:num_clips]
         await context.bot.send_message(chat_id, f"✂️ Создаю {len(clips)} шортов...")
         
         # Обработка каждого клипа
@@ -109,38 +163,41 @@ async def process_video_task(video_path: str, num_clips: int, chat_id: int, cont
             try:
                 await context.bot.send_message(chat_id, f"⚙️ Обрабатываю шорт {idx}/{len(clips)}...")
                 
-                # Нарезка видео
-                clip.crop(video_path)
-                
-                # Изменение размера до 9:16
-                resized_clip = resize(clip, "social_media")
-                
-                # Добавление субтитров
-                final_clip = add_subtitles(
-                    resized_clip,
-                    font="Montserrat-ExtraBold",
-                    font_color="white",
-                    stroke_color="black",
-                    stroke_width=3
-                )
-                
                 # Генерация заголовка
-                clip_words = [w.word for w in clip.transcription.words[:40]]
-                clip_text = " ".join(clip_words)
+                clip_words = [w["word"] for w in transcription.get_word_info() 
+                             if w["start_time"] >= clip.start_time and w["end_time"] <= clip.end_time]
+                clip_text = " ".join(clip_words[:40])
                 viral_title = generate_viral_title(clip_text)
                 
-                # Сохранение
+                # Создаем временный файл для обрезанного видео
+                temp_cropped = f"output/temp_cropped_{idx}.mp4"
+                
+                # Обрезаем видео по времени с помощью FFmpeg
+                cmd = [
+                    'ffmpeg', '-i', video_path,
+                    '-ss', str(clip.start_time),
+                    '-t', str(clip.end_time - clip.start_time),
+                    '-c', 'copy',
+                    '-y', temp_cropped
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+                
+                # Изменяем размер до 9:16 (1080x1920)
+                temp_resized = f"output/temp_resized_{idx}.mp4"
+                cmd = [
+                    'ffmpeg', '-i', temp_cropped,
+                    '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
+                    '-c:a', 'copy',
+                    '-y', temp_resized
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+                
+                # Добавляем субтитры
                 output_file = f"output/short_{idx}.mp4"
-                final_clip.write_videofile(
-                    output_file,
-                    codec='libx264',
-                    audio_codec='aac',
-                    verbose=False,
-                    logger=None
-                )
+                final_video = create_subtitled_video(temp_resized, transcription, clip, output_file)
                 
                 # Отправка в Telegram
-                with open(output_file, 'rb') as video:
+                with open(final_video, 'rb') as video:
                     await context.bot.send_video(
                         chat_id,
                         video=video,
@@ -150,8 +207,10 @@ async def process_video_task(video_path: str, num_clips: int, chat_id: int, cont
                         height=1920
                     )
                 
-                # Удаление временного файла
-                os.remove(output_file)
+                # Удаление временных файлов
+                for temp_file in [temp_cropped, temp_resized, output_file]:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
                 
             except Exception as e:
                 logger.error(f"Error processing clip {idx}: {e}")
@@ -209,7 +268,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 *Статус бота:*
 
 🟢 Статус: Активен
-⚙️ Модель: Whisper Base
+⚙️ Модель: Whisper Large-v2
 📝 Активных задач: {active_tasks}
 🎬 Доступность: Готов к работе
 """
