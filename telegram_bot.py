@@ -33,19 +33,33 @@ logger = logging.getLogger(__name__)
 
 # Установка переменных окружения
 os.environ['HUGGINGFACE_TOKEN'] = HUGGINGFACE_TOKEN
+os.environ['HF_TOKEN'] = HUGGINGFACE_TOKEN
 
 # Создание папок
 Path("input").mkdir(exist_ok=True)
 Path("output").mkdir(exist_ok=True)
 
-# Инициализация AI моделей
-logger.info("🤖 Инициализация AI моделей...")
-transcriber = Transcriber(model_size="large-v2")  # large-v2 = лучшая точность
-clip_finder = ClipFinder()
-groq_client = Groq(api_key=GROQ_API_KEY)
+# Глобальные переменные для ленивой инициализации
+transcriber = None
+clip_finder = None
+groq_client = None
 
 # Отслеживание активных процессов
 user_processes = {}
+
+def init_models():
+    """Ленивая инициализация моделей"""
+    global transcriber, clip_finder, groq_client
+    if transcriber is None:
+        logger.info("🤖 Инициализация AI моделей...")
+        try:
+            transcriber = Transcriber()
+            clip_finder = ClipFinder()
+            groq_client = Groq(api_key=GROQ_API_KEY)
+            logger.info("✅ Модели загружены!")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации моделей: {e}")
+            raise
 
 def download_youtube_video(url: str) -> tuple:
     """Скачивает видео с YouTube"""
@@ -92,8 +106,8 @@ def create_subtitled_video(video_path: str, transcription, clip, output_path: st
     """Создает видео с субтитрами"""
     try:
         # Получаем слова для клипа
-        word_info = [w for w in transcription.get_word_info() 
-                     if w["start_time"] >= clip.start_time and w["end_time"] <= clip.end_time]
+        word_info = [w for w in transcription.words 
+                     if w.start >= clip.start_time and w.end <= clip.end_time]
         
         if not word_info:
             logger.warning("No words found for subtitles, returning original video")
@@ -105,9 +119,9 @@ def create_subtitled_video(video_path: str, transcription, clip, output_path: st
             counter = 1
             for i in range(0, len(word_info), 5):  # Группируем по 5 слов
                 words_group = word_info[i:i+5]
-                start_time = words_group[0]["start_time"] - clip.start_time
-                end_time = words_group[-1]["end_time"] - clip.start_time
-                text = " ".join([w["word"] for w in words_group])
+                start_time = words_group[0].start - clip.start_time
+                end_time = words_group[-1].end - clip.start_time
+                text = " ".join([w.word for w in words_group])
                 
                 f.write(f"{counter}\n")
                 f.write(f"{format_srt_time(start_time)} --> {format_srt_time(end_time)}\n")
@@ -121,10 +135,15 @@ def create_subtitled_video(video_path: str, transcription, clip, output_path: st
             '-c:a', 'copy',
             '-y', output_path
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg subtitle error: {result.stderr}")
+            return video_path
         
         # Удаляем временный SRT файл
-        os.remove(srt_file)
+        if os.path.exists(srt_file):
+            os.remove(srt_file)
         
         return output_path
     except Exception as e:
@@ -142,6 +161,9 @@ def format_srt_time(seconds: float) -> str:
 async def process_video_task(video_path: str, num_clips: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Обработка видео в фоне"""
     try:
+        # Инициализация моделей если нужно
+        init_models()
+        
         # Транскрибация
         await context.bot.send_message(chat_id, "📝 Транскрибирую видео... (это может занять несколько минут)")
         transcription = transcriber.transcribe(audio_file_path=video_path)
@@ -164,8 +186,8 @@ async def process_video_task(video_path: str, num_clips: int, chat_id: int, cont
                 await context.bot.send_message(chat_id, f"⚙️ Обрабатываю шорт {idx}/{len(clips)}...")
                 
                 # Генерация заголовка
-                clip_words = [w["word"] for w in transcription.get_word_info() 
-                             if w["start_time"] >= clip.start_time and w["end_time"] <= clip.end_time]
+                clip_words = [w.word for w in transcription.words 
+                             if w.start >= clip.start_time and w.end <= clip.end_time]
                 clip_text = " ".join(clip_words[:40])
                 viral_title = generate_viral_title(clip_text)
                 
@@ -379,7 +401,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("✅ Бот запущен и готов к работе!")
-    logger.info("📱 Отправь ссылку YouTube в @MyYoutubeShortBot")
+    logger.info("📱 Отправь ссылку YouTube в бота")
     
     # Запуск polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
