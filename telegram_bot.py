@@ -20,9 +20,9 @@ from huggingface_hub import login
 from clipsai import Transcriber, ClipFinder, resize, MediaEditor, AudioVideoFile
 
 # ============= НАСТРОЙКИ =============
-TELEGRAM_BOT_TOKEN = "8577135156:AAFij6C6rbbzmgg761svzglXNZ4O6xL92Dg"
-HUGGINGFACE_TOKEN = "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"
-GROQ_API_KEY = "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"
+TELEGRAM_BOT_TOKEN = "YourToken"
+HUGGINGFACE_TOKEN = "YourToken"
+GROQ_API_KEY = "YourToken"
 # =====================================
 
 # Настройка логирования
